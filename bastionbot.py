@@ -29,6 +29,8 @@ handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w'
 handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
 logger.addHandler(handler)
 
+last_activity = {}
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 
@@ -432,14 +434,25 @@ def update_dc_steam(dc_steam_new):
     
 def check_high_prio(item_list):
     high_prio_items = [
-        "HDSN_BreachingCharge",
-        "HDSN_BreachingChargeHeavy",
-        "RaidHacksaw",
-        "RaidLockpick",
-        "TP_6B43_Desert",
-        "TP_6B43_Flora",
-        "TP_6B43_DigitalFlora",
-        "TP_6b43_Black"
+        "B_Improvised_C4",
+        "B_C4",
+        "RA_Gunpowder",
+        "JD_RPG",
+        "Ammo_JD_RPG_Rocket",
+        "Explode_Pack",
+        "Keycard_Green",
+        "Keycard_Blue",
+        "Keycard_Red",
+        "Keycard_Yellow",
+        "Keycard_Purple",
+        "Keycard_Black",
+        "Toxicm18SmokeGrenade_Red",
+        "Toxicm18SmokeGrenade_Green",
+        "Toxicm18SmokeGrenade_Purple",
+        "Toxicm18SmokeGrenade_Yellow",
+        "Toxicm18SmokeGrenade_White",
+        "grenade_chemgas",
+        "ammo_40mm_explosive"
     ]
     escalate = False
     for item in item_list:
@@ -650,10 +663,42 @@ async def update_ticket_perms(message):
     else:
         server = "failed"
 
+@tasks.loop(minutes=1)
+async def check_inactivity():
+    current_time = datetime.datetime.now()
+    to_remove = []
+    
+    for channel_id, last_time in last_activity.items():
+        if (current_time - last_time).total_seconds() >= 1800:  # 30 minutes
+            to_remove.append(channel_id)
+    
+    for channel_id in to_remove:
+        channel = client.get_channel(channel_id)
+        if channel:
+            try:
+                # Preserve original unclaim logic
+                current_name = channel.name
+                new_name = current_name
+                for i in admin_list.values():
+                    admin_name = re.sub(r'\W+', '', str(i)).lower()
+                    if admin_name in current_name.lower():
+                        new_name = current_name.replace(admin_name + "-", "")
+                for i in emoji_list:
+                    new_name = new_name.replace(i + "-", "")
+                
+                await channel.edit(name=new_name)
+                embedVar = discord.Embed(description='🎟️ Ticket automatically unclaimed due to 30 minutes of inactivity')
+                await channel.send(embed=embedVar)
+                await add_log(f"Ticket {channel.id} unclaimed due to inactivity")
+            except Exception as e:
+                print(f"Error unclaiming ticket: {e}")
+            finally:
+                del last_activity[channel_id]
 
 @client.event
 async def on_ready():
     await add_log('BOT REBOOTED')
+    check_inactivity.start()
     #webhook_async.start()
     read_form_data()
 
@@ -694,33 +739,40 @@ async def on_raw_reaction_add(payload):
             
     if str(channel.category.id) in allowed_categories:
 
-        if str(payload.emoji) == "📌" :
+        if str(payload.emoji) == "📌":
             if str(payload.user_id) in admin_list:
                 ticket_owner = re.sub(r'\W+', '', str(payload.member.display_name)).lower()
                 if "ARTRIX" in ticket_owner:
                     ticket_owner = "🍆-" + ticket_owner
                 new_name = str(channel.name)
+                
+                # Existing name cleanup logic
                 for i in admin_list.values():
                     admin_name = re.sub(r'\W+', '', str(i)).lower()
                     if admin_name in str(channel.name):
-                        new_name = str(channel.name).replace(admin_name + "-", "")
+                        new_name = new_name.replace(admin_name + "-", "")
                 for i in emoji_list:
                     new_name = new_name.replace(i + "-", "")
+
                 if ticket_owner in str(channel.name):
-                    new_name = str(channel.name).replace(ticket_owner + "-", "")
-                    embedVar = discord.Embed(description='Ticket has been unclaimed by ' +str(payload.member.display_name))
-                    await message.channel.send(embed=embedVar)
+                    # Manual unclaim
+                    new_name = new_name.replace(ticket_owner + "-", "")
+                    embedVar = discord.Embed(description=f'Ticket has been unclaimed by {payload.member.display_name}')
+                    # Remove from activity tracking
+                    if channel.id in last_activity:
+                        del last_activity[channel.id]
                 else:
-                    new_name = str(ticket_owner) + "-" + str(new_name)
-                    embedVar = discord.Embed(description='Ticket has been claimed by ' +str(payload.member.display_name))
-                    await message.channel.send(embed=embedVar)
-                await channel.edit(name = new_name)
+                    # Manual claim
+                    new_name = f"{ticket_owner}-{new_name}"
+                    embedVar = discord.Embed(description=f'Ticket has been claimed by {payload.member.display_name}')
+                    # Start tracking activity
+                    last_activity[channel.id] = datetime.datetime.now()
+
+                await channel.edit(name=new_name)
                 await message.remove_reaction("📌", payload.member)
-                channel = client.get_channel(1305326901388382242)
-                await channel.send("📌 used by " + payload.member.display_name + " in " + new_name)
-            else:
-                if not payload.user_id == 1300850899580747957:
-                    await message.remove_reaction("📌", payload.member)
+                await message.channel.send(embed=embedVar)
+                log_channel = client.get_channel(1305326901388382242)
+                await log_channel.send(f"📌 used by {payload.member.display_name} in {new_name}")
 
         elif str(payload.emoji) == "🟢" :
             if str(payload.user_id) in admin_list:
@@ -911,6 +963,10 @@ async def on_message(message):
     #     for i in emoji_list:
     #         await message.add_reaction(i)
     #admin_list = json.loads(requests.get("https://raw.githubusercontent.com/xdesignful/Admins/main/admins.json", headers=admin_headers).content)
+    if message.guild and str(message.channel.category.id) in allowed_categories:
+        if not message.author.bot and message.channel.id in last_activity:
+            # Reset activity timer on any user message
+            last_activity[message.channel.id] = datetime.datetime.now()
     if not message.guild:
         #if "sawubona" in str(message.content).lower(): 
         #    await message.channel.send("The door code is 81273 - the location is the key for the code you already solved, in a place you may have already been if you competed in a previous event.")
