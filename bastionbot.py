@@ -62,6 +62,7 @@ with open('admin_list.txt') as f:
 
 #admin_list = get_role_users()
 
+ticket_timers = {}
 
 api_relational = {
     "c5738674-bac8-4e04-94e7-bb121198fa2c": "-3z_eh1tNJ-ETNUQAR1XqygFlLa8ypqBsID0szosgeg=", #US1
@@ -700,27 +701,31 @@ async def on_raw_reaction_add(payload):
                 if "ARTRIX" in ticket_owner:
                     ticket_owner = "🍆-" + ticket_owner
                 new_name = str(channel.name)
+
                 for i in admin_list.values():
                     admin_name = re.sub(r'\W+', '', str(i)).lower()
                     if admin_name in str(channel.name):
                         new_name = str(channel.name).replace(admin_name + "-", "")
+
                 for i in emoji_list:
                     new_name = new_name.replace(i + "-", "")
+
                 if ticket_owner in str(channel.name):
                     new_name = str(channel.name).replace(ticket_owner + "-", "")
                     embedVar = discord.Embed(description='Ticket has been unclaimed by ' +str(payload.member.display_name))
                     await message.channel.send(embed=embedVar)
+                    ticket_timers[channel.id] = "waiting"  # Reset auto-unclaim to prevent instant re-unclaim
                 else:
                     new_name = str(ticket_owner) + "-" + str(new_name)
                     embedVar = discord.Embed(description='Ticket has been claimed by ' +str(payload.member.display_name))
                     await message.channel.send(embed=embedVar)
-                await channel.edit(name = new_name)
+                    ticket_timers[channel.id] = "active"  # Stop unclaiming while claimed
+
+                await channel.edit(name=new_name)
                 await message.remove_reaction("📌", payload.member)
+
                 channel = client.get_channel(1305326901388382242)
                 await channel.send("📌 used by " + payload.member.display_name + " in " + new_name)
-            else:
-                if not payload.user_id == 1300850899580747957:
-                    await message.remove_reaction("📌", payload.member)
 
         elif str(payload.emoji) == "🟢" :
             if str(payload.user_id) in admin_list:
@@ -894,7 +899,29 @@ async def on_raw_reaction_add(payload):
                 if not payload.user_id == 1300850899580747957:
                     await message.remove_reaction("❌", payload.member)
 
-        
+async def unclaim_ticket(channel):
+    """Unclaims a ticket after 30 minutes of inactivity if still claimed."""
+    await asyncio.sleep(30)  # Wait 30 minutes
+
+    # Check if still waiting (no new messages)
+    if ticket_timers.get(channel.id) == "waiting":
+        new_name = re.sub(r'[^\w-]', '', channel.name)  # Remove special characters
+
+        # Remove claim markers (only if ticket is still marked as claimed)
+        for emoji in ['📌', '🟢', '🔴', '🟠', '🟡', '⚫', '🕙']:
+            if emoji in new_name:
+                new_name = new_name.replace(emoji + "-", "")
+
+                # Rename ticket to unclaim it
+                await channel.edit(name=new_name)
+                embed = discord.Embed(description="This ticket has been unclaimed due to inactivity.", color=discord.Color.orange())
+                await channel.send(embed=embed)
+
+                # Log the unclaim action
+                log_channel = channel.guild.get_channel(1305326901388382242)  # Replace with your log channel ID
+                if log_channel:
+                    await log_channel.send(f"Ticket **{channel.name}** was unclaimed due to inactivity.")
+                break  # Stop after first claim emoji is found
 
 @client.event
 async def on_message(message):
@@ -974,10 +1001,18 @@ async def on_message(message):
             else:
                 await message.delete()
 
-        elif str(message.channel.category.id) in allowed_categories:
-            #This is the ticket categories               
-            channel_id = str(message.channel.id)
-            seen = used_channels
+        if str(message.channel.category.id) in allowed_categories:
+            channel_id = message.channel.id
+
+            # Reset the inactivity timer when someone speaks
+            ticket_timers[channel_id] = "active"
+
+            # Start the unclaim timer if it's not already running
+            if channel_id not in ticket_timers or ticket_timers[channel_id] != "waiting":
+                ticket_timers[channel_id] = "waiting"
+                asyncio.create_task(unclaim_ticket(message.channel))
+
+                    seen = used_channels
             seen_id = used_channels_ids
             if "$fixticket" in str(message.content) and str(message.author.id) in admin_list:
                 await update_ticket_perms(message)
