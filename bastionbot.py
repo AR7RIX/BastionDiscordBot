@@ -30,6 +30,7 @@ handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(me
 logger.addHandler(handler)
 
 last_activity = {}
+countdown_messages = {}
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
@@ -668,15 +669,25 @@ async def check_inactivity():
     current_time = datetime.datetime.now()
     to_remove = []
     
-    for channel_id, last_time in last_activity.items():
-        if (current_time - last_time).total_seconds() >= 1800:  # 30 minutes
-            to_remove.append(channel_id)
-    
-    for channel_id in to_remove:
-        channel = client.get_channel(channel_id)
-        if channel:
-            try:
-                # Preserve original unclaim logic
+    for channel_id, last_time in list(last_activity.items()):
+        try:
+            channel = client.get_channel(channel_id)
+            if not channel:
+                continue
+
+            elapsed = (current_time - last_time).total_seconds()
+            remaining = 1800 - elapsed
+            minutes_left = max(0, int(remaining // 60))
+
+            # Update countdown message
+            if channel_id in countdown_messages:
+                try:
+                    msg = await channel.fetch_message(countdown_messages[channel_id])
+                    await msg.edit(content=f"⏳ Auto-unclaim in: {minutes_left} minutes (Last activity: {last_time.strftime('%H:%M:%S')})")
+                except:
+                    countdown_messages[channel_id] = None
+
+            if remaining <= 0:
                 current_name = channel.name
                 new_name = current_name
                 for i in admin_list.values():
@@ -686,14 +697,30 @@ async def check_inactivity():
                 for i in emoji_list:
                     new_name = new_name.replace(i + "-", "")
                 
-                await channel.edit(name=new_name)
-                embedVar = discord.Embed(description='🎟️ Ticket automatically unclaimed due to 30 minutes of inactivity')
-                await channel.send(embed=embedVar)
-                await add_log(f"Ticket {channel.id} unclaimed due to inactivity")
-            except Exception as e:
-                print(f"Error unclaiming ticket: {e}")
-            finally:
-                del last_activity[channel_id]
+                try:
+                    await channel.edit(name=new_name)
+                    embedVar = discord.Embed(description='🎟️ Ticket automatically unclaimed due to 30 minutes of inactivity')
+                    await channel.send(embed=embedVar)
+                    await add_log(f"Ticket {channel.id} unclaimed due to inactivity")
+                except Exception as e:
+                    print(f"Error unclaiming ticket: {e}")
+                
+                if channel_id in countdown_messages:
+                    try:
+                        msg = await channel.fetch_message(countdown_messages[channel_id])
+                        await msg.delete()
+                    except:
+                        pass
+                    del countdown_messages[channel_id]
+                
+                to_remove.append(channel_id)
+
+        except Exception as e:
+            print(f"Error processing channel {channel_id}: {str(e)}")
+    
+    for channel_id in to_remove:
+        if channel_id in last_activity:
+            del last_activity[channel_id]
 
 @client.event
 async def on_ready():
@@ -756,17 +783,17 @@ async def on_raw_reaction_add(payload):
 
                 if ticket_owner in str(channel.name):
                     # Manual unclaim
-                    new_name = new_name.replace(ticket_owner + "-", "")
-                    embedVar = discord.Embed(description=f'Ticket has been unclaimed by {payload.member.display_name}')
-                    # Remove from activity tracking
-                    if channel.id in last_activity:
-                        del last_activity[channel.id]
+                    if channel.id in countdown_messages:
+                        try:
+                            msg = await channel.fetch_message(countdown_messages[channel.id])
+                            await msg.delete()
+                        except:
+                            pass
+                        del countdown_messages[channel.id]
                 else:
                     # Manual claim
-                    new_name = f"{ticket_owner}-{new_name}"
-                    embedVar = discord.Embed(description=f'Ticket has been claimed by {payload.member.display_name}')
-                    # Start tracking activity
-                    last_activity[channel.id] = datetime.datetime.now()
+                    msg = await channel.send(f"⏳ Auto-unclaim in: 30 minutes (Last activity: {datetime.datetime.now().strftime('%H:%M:%S')})")
+                    countdown_messages[channel.id] = msg.id
 
                 await channel.edit(name=new_name)
                 await message.remove_reaction("📌", payload.member)
@@ -964,9 +991,23 @@ async def on_message(message):
     #         await message.add_reaction(i)
     #admin_list = json.loads(requests.get("https://raw.githubusercontent.com/xdesignful/Admins/main/admins.json", headers=admin_headers).content)
     if message.guild and str(message.channel.category.id) in allowed_categories:
-        if not message.author.bot and message.channel.id in last_activity:
-            # Reset activity timer on any user message
+        if not message.author.bot:
             last_activity[message.channel.id] = datetime.datetime.now()
+            
+            # Update countdown message
+            if message.channel.id in countdown_messages:
+                try:
+                    msg = await message.channel.fetch_message(countdown_messages[message.channel.id])
+                    elapsed = (datetime.datetime.now() - last_activity[message.channel.id]).total_seconds()
+                    remaining = 1800 - elapsed
+                    minutes_left = max(0, int(remaining // 60))
+                    await msg.edit(content=f"⏳ Auto-unclaim in: {minutes_left} minutes (Last activity: {last_activity[message.channel.id].strftime('%H:%M:%S')})")
+                except:
+                    pass
+            else:
+                # Create new countdown message
+                msg = await message.channel.send(f"⏳ Auto-unclaim in: 30 minutes (Last activity: {datetime.datetime.now().strftime('%H:%M:%S')})")
+                countdown_messages[message.channel.id] = msg.id
     if not message.guild:
         #if "sawubona" in str(message.content).lower(): 
         #    await message.channel.send("The door code is 81273 - the location is the key for the code you already solved, in a place you may have already been if you competed in a previous event.")
